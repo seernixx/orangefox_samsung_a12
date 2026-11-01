@@ -1,0 +1,104 @@
+name: Build OrangeFox for Samsung Galaxy A12 (SM-A125F)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+      - fox-12.1
+
+jobs:
+  build:
+    name: Build OrangeFox Recovery
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Device Tree
+        uses: actions/checkout@v4
+        with:
+          path: device_tree
+
+      - name: Free Disk Space
+        uses: rokibhasansagar/slimhub_actions@main
+
+      - name: Set up Swap Space (24GB)
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 24
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y aria2 git-core gnupg flex bison build-essential zip curl zlib1g-dev \
+            libc6-dev-i386 x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils \
+            xsltproc unzip fontconfig python3 libncurses5 python-is-python3
+          git clone https://gitlab.com/OrangeFox/misc/scripts.git -b master
+          cd scripts
+          sudo bash setup/android_build_env.sh
+
+      - name: Set Git Config
+        run: |
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+
+      - name: Sync OrangeFox 12.1 Manifest
+        run: |
+          mkdir -p ${GITHUB_WORKSPACE}/OrangeFox
+          cd ${GITHUB_WORKSPACE}/OrangeFox
+          git clone https://gitlab.com/OrangeFox/sync.git -b master
+          cd sync
+          ./orangefox_sync.sh --branch 12.1 --path ${GITHUB_WORKSPACE}/OrangeFox/fox_12.1
+
+      - name: Setup Device Tree
+        run: |
+          mkdir -p ${GITHUB_WORKSPACE}/OrangeFox/fox_12.1/device/samsung/a12
+          cp -r ${GITHUB_WORKSPACE}/device_tree/* ${GITHUB_WORKSPACE}/OrangeFox/fox_12.1/device/samsung/a12/
+          rm -rf ${GITHUB_WORKSPACE}/OrangeFox/fox_12.1/device/samsung/a12/.git
+
+      - name: Compile OrangeFox
+        run: |
+          cd ${GITHUB_WORKSPACE}/OrangeFox/fox_12.1
+          set +e
+          source build/envsetup.sh
+          export ALLOW_MISSING_DEPENDENCIES=true
+          lunch fox_a12-eng || lunch twrp_a12-eng
+          set -e
+          mka recoveryimage -j$(nproc --all)
+
+      - name: Prepare Samsung Flashable TAR Package
+        run: |
+          cd ${GITHUB_WORKSPACE}/OrangeFox/fox_12.1/out/target/product/a12
+          if [ -f "recovery.img" ]; then
+            tar -cvf OrangeFox-SM-A125F.tar recovery.img
+            md5sum -t OrangeFox-SM-A125F.tar >> OrangeFox-SM-A125F.tar
+            mv OrangeFox-SM-A125F.tar OrangeFox-SM-A125F.tar.md5
+          fi
+          mkdir -p ${GITHUB_WORKSPACE}/build_artifacts
+          cp -f OrangeFox*.zip ${GITHUB_WORKSPACE}/build_artifacts/ || true
+          cp -f recovery.img ${GITHUB_WORKSPACE}/build_artifacts/ || true
+          cp -f OrangeFox-SM-A125F.tar.md5 ${GITHUB_WORKSPACE}/build_artifacts/ || true
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrangeFox-SM-A125F
+          path: build_artifacts/*
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          files: build_artifacts/*
+          tag_name: build-${{ github.run_id }}
+          name: OrangeFox Recovery for Samsung Galaxy A12 (SM-A125F)
+          body: |
+            ### Unofficial OrangeFox Recovery for Samsung Galaxy A12 (SM-A125F)
+            - **Android Version Base:** 12 (One UI Core 4.1)
+            - **SoC:** MediaTek MT6765 (Helio P35)
+            - **Package types:**
+              - `OrangeFox-SM-A125F.tar.md5` — Для прошивки через Odin4 / Heimdall на Linux или ПК
+              - `recovery.img` — Чистый образ раздела Recovery
+              - `OrangeFox-*.zip` — Установочный zip архив для кастомных рекавери
